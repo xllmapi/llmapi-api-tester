@@ -39,9 +39,11 @@ async function run(config: ProviderConfig): Promise<TestResult> {
     const hasMessageDelta = eventTypes.includes("message_delta");
     const hasMessageStop = eventTypes.includes("message_stop");
 
-    // Check message_start contains complete message object
+    // Parse message_start
     let messageStartComplete = false;
-    let messageStartInputTokens: number | null = null;
+    let msInputTokens = 0;
+    let msCacheRead = 0;
+    let msCacheCreation = 0;
     for (const ev of events) {
       if (ev.event === "message_start") {
         try {
@@ -49,12 +51,14 @@ async function run(config: ProviderConfig): Promise<TestResult> {
           const msg = parsed.message as Record<string, unknown> | undefined;
           if (msg?.id && msg?.type && msg?.role) messageStartComplete = true;
           const usage = msg?.usage as Record<string, number> | undefined;
-          messageStartInputTokens = usage?.input_tokens ?? null;
+          msInputTokens = usage?.input_tokens ?? 0;
+          msCacheRead = usage?.cache_read_input_tokens ?? 0;
+          msCacheCreation = usage?.cache_creation_input_tokens ?? 0;
         } catch { /* ignore */ }
       }
     }
 
-    // Check content_block_delta has valid content (text_delta OR thinking_delta)
+    // Parse content_block_delta
     let hasValidDelta = false;
     for (const ev of events) {
       if (ev.event === "content_block_delta") {
@@ -67,7 +71,7 @@ async function run(config: ProviderConfig): Promise<TestResult> {
       }
     }
 
-    // Check message_delta has stop_reason and usage
+    // Parse message_delta
     let messageDeltaHasStopReason = false;
     let messageDeltaOutputTokens: number | null = null;
     for (const ev of events) {
@@ -82,7 +86,7 @@ async function run(config: ProviderConfig): Promise<TestResult> {
       }
     }
 
-    // Check colon spacing in raw SSE
+    // SSE colon spacing
     let colonSpacingCorrect = true;
     for (const ev of events) {
       if (ev.raw.match(/^event:\S/)) {
@@ -90,6 +94,10 @@ async function run(config: ProviderConfig): Promise<TestResult> {
         break;
       }
     }
+
+    // Cache-aware analysis
+    const totalInput = msInputTokens + msCacheRead + msCacheCreation;
+    const hasCacheFields = msCacheRead > 0 || msCacheCreation > 0;
 
     const checks: CheckResult[] = [
       must("event: message_start", hasMessageStart, "流式首事件缺失", "present", hasMessageStart ? "present" : "missing"),
@@ -101,10 +109,26 @@ async function run(config: ProviderConfig): Promise<TestResult> {
       must("event: message_delta", hasMessageDelta, "缺少消息终止事件", "present", hasMessageDelta ? "present" : "missing"),
       must("message_delta contains stop_reason", messageDeltaHasStopReason, "终止事件缺少停止原因", "non-null", messageDeltaHasStopReason ? "present" : "missing"),
       must("event: message_stop", hasMessageStop, "流未正常终止", "present", hasMessageStop ? "present" : "missing"),
-      must("message_start usage.input_tokens > 0", messageStartInputTokens != null && messageStartInputTokens > 0, "Anthropic 规范要求 message_start 包含 input_tokens（代理转换场景可能为 0，因上游 OpenAI 流开始时不提供此值）", "> 0", String(messageStartInputTokens)),
       must("message_delta usage.output_tokens > 0", messageDeltaOutputTokens != null && messageDeltaOutputTokens > 0, "Anthropic 规范要求 message_delta 包含 output_tokens", "> 0", String(messageDeltaOutputTokens)),
-      should('SSE event: colon spacing ("event: X")', colonSpacingCorrect, "WHATWG SSE 规范中空格可选，但 Anthropic 官方示例始终使用空格", '"event: X"', colonSpacingCorrect ? "correct" : '"event:X"'),
     ];
+
+    // Input token checks: cache-aware
+    if (hasCacheFields) {
+      checks.push(
+        must(`total input tokens > 0 (input=${msInputTokens} + cache_read=${msCacheRead} + cache_creation=${msCacheCreation})`, totalInput > 0, "输入 token 总量（含缓存）必须大于 0", "> 0", String(totalInput)),
+        should("message_start usage.input_tokens > 0", msInputTokens > 0, `input_tokens=0 因全部命中缓存（cache_read=${msCacheRead}），Anthropic 规范允许此行为`, "> 0", String(msInputTokens)),
+        should("message_start usage.cache_read_input_tokens present", msCacheRead >= 0, "使用了缓存时应返回 cache_read_input_tokens", ">= 0", String(msCacheRead)),
+        should("message_start usage.cache_creation_input_tokens present", msCacheCreation >= 0, "使用了缓存时应返回 cache_creation_input_tokens", ">= 0", String(msCacheCreation)),
+      );
+    } else {
+      checks.push(
+        must("message_start usage.input_tokens > 0", msInputTokens > 0, "Anthropic 规范要求 message_start 包含 input_tokens（代理转换场景可能为 0，因上游 OpenAI 流开始时不提供此值）", "> 0", String(msInputTokens)),
+      );
+    }
+
+    checks.push(
+      should('SSE event: colon spacing ("event: X")', colonSpacingCorrect, "WHATWG SSE 规范中空格可选，但 Anthropic 官方示例始终使用空格", '"event: X"', colonSpacingCorrect ? "correct" : '"event:X"'),
+    );
 
     return {
       status: "done", checks, duration,

@@ -41,6 +41,18 @@ async function run(config: ProviderConfig): Promise<TestResult> {
       should("usage.total_tokens === prompt + completion", usage?.total_tokens === (usage?.prompt_tokens ?? 0) + (usage?.completion_tokens ?? 0), "Token 计算不一致，影响计费准确性", String((usage?.prompt_tokens ?? 0) + (usage?.completion_tokens ?? 0)), String(usage?.total_tokens)),
     ];
 
+    // OpenAI cache fields (prompt_tokens_details.cached_tokens)
+    if (usage) {
+      const details = (body?.usage as Record<string, unknown>)?.prompt_tokens_details as Record<string, number> | undefined;
+      const cachedTokens = details?.cached_tokens;
+      if (cachedTokens != null && cachedTokens >= 0) {
+        checks.push(
+          should("usage.prompt_tokens_details.cached_tokens present", true, "", String(cachedTokens), String(cachedTokens)),
+          should("cached_tokens <= prompt_tokens", cachedTokens <= (usage?.prompt_tokens ?? 0), "缓存 token 数不应超过 prompt_tokens 总量", `<= ${usage?.prompt_tokens}`, String(cachedTokens)),
+        );
+      }
+    }
+
     return {
       status: "done", checks, duration,
       request: { method: "POST", url: `${config.baseUrl}/v1/chat/completions`, headers: { Authorization: "Bearer ***" }, body: reqBody },

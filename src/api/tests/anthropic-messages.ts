@@ -4,6 +4,9 @@ import { fetchJSON } from "../client";
 function must(name: string, passed: boolean, reason: string, expected?: string, actual?: string): CheckResult {
   return { name, status: passed ? "pass" : "fail", level: "must", expected, actual, reason: passed ? undefined : reason };
 }
+function should(name: string, passed: boolean, reason: string, expected?: string, actual?: string): CheckResult {
+  return { name, status: passed ? "pass" : "warn", level: "should", expected, actual, reason: passed ? undefined : reason };
+}
 
 async function run(config: ProviderConfig): Promise<TestResult> {
   const start = performance.now();
@@ -27,6 +30,13 @@ async function run(config: ProviderConfig): Promise<TestResult> {
     const hasTextContent = Array.isArray(content) && content.some((c) => c.type === "text");
     const contentTypes = Array.isArray(content) ? content.map((c) => c.type).join(", ") : "not array";
 
+    // Cache-aware token analysis
+    const inputTokens = usage?.input_tokens ?? 0;
+    const cacheRead = usage?.cache_read_input_tokens ?? 0;
+    const cacheCreation = usage?.cache_creation_input_tokens ?? 0;
+    const totalInput = inputTokens + cacheRead + cacheCreation;
+    const hasCacheFields = cacheRead > 0 || cacheCreation > 0;
+
     const checks: CheckResult[] = [
       must("HTTP 200", res.status === 200, "接口不可用或认证失败", "200", String(res.status)),
       must('type === "message"', body?.type === "message", "响应类型标识错误", '"message"', JSON.stringify(body?.type)),
@@ -36,9 +46,22 @@ async function run(config: ProviderConfig): Promise<TestResult> {
       must("id exists", typeof body?.id === "string", "响应缺少必需字段", "string", typeof body?.id),
       must("model exists", typeof body?.model === "string", "响应缺少必需字段", "string", typeof body?.model),
       must("stop_reason exists", body?.stop_reason != null, "缺少停止原因（end_turn/stop_sequence/max_tokens/tool_use）", "non-null", JSON.stringify(body?.stop_reason)),
-      must("usage.input_tokens > 0", (usage?.input_tokens ?? 0) > 0, "Anthropic 规范 usage 为必需字段", "> 0", String(usage?.input_tokens)),
       must("usage.output_tokens > 0", (usage?.output_tokens ?? 0) > 0, "Anthropic 规范 usage 为必需字段", "> 0", String(usage?.output_tokens)),
     ];
+
+    // Token input checks: total_input is MUST, input_tokens alone is SHOULD (can be 0 with cache)
+    if (hasCacheFields) {
+      checks.push(
+        must(`total input tokens > 0 (input=${inputTokens} + cache_read=${cacheRead} + cache_creation=${cacheCreation})`, totalInput > 0, "输入 token 总量（含缓存）必须大于 0", "> 0", String(totalInput)),
+        should("usage.input_tokens > 0", inputTokens > 0, `input_tokens=0 因全部命中缓存（cache_read=${cacheRead}），Anthropic 规范允许此行为`, "> 0", String(inputTokens)),
+        should("usage.cache_read_input_tokens present", typeof usage?.cache_read_input_tokens === "number", "使用了缓存时应返回 cache_read_input_tokens", "number", String(cacheRead)),
+        should("usage.cache_creation_input_tokens present", typeof usage?.cache_creation_input_tokens === "number", "使用了缓存时应返回 cache_creation_input_tokens", "number", String(cacheCreation)),
+      );
+    } else {
+      checks.push(
+        must("usage.input_tokens > 0", inputTokens > 0, "Anthropic 规范要求 usage.input_tokens 为必需字段且大于 0", "> 0", String(inputTokens)),
+      );
+    }
 
     return {
       status: "done", checks, duration,

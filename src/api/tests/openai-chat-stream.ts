@@ -76,6 +76,18 @@ async function run(config: ProviderConfig): Promise<TestResult> {
       should("usage.completion_tokens >= 0", (ct ?? -1) >= 0, "Token 计量缺失", ">= 0", String(ct)),
     ];
 
+    // OpenAI cache fields in streaming usage chunk
+    if (usageChunk) {
+      const details = usageChunk.prompt_tokens_details as Record<string, number> | undefined;
+      const cachedTokens = details?.cached_tokens;
+      if (cachedTokens != null && cachedTokens >= 0) {
+        checks.push(
+          should("usage.prompt_tokens_details.cached_tokens present", true, "", String(cachedTokens), String(cachedTokens)),
+          should("cached_tokens <= prompt_tokens", cachedTokens <= (pt ?? 0), "缓存 token 数不应超过 prompt_tokens 总量", `<= ${pt}`, String(cachedTokens)),
+        );
+      }
+    }
+
     return {
       status: "done", checks, duration,
       request: { method: "POST", url: `${config.baseUrl}/v1/chat/completions`, headers: { Authorization: "Bearer ***" }, body: reqBody },
