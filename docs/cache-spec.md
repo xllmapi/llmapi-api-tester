@@ -52,3 +52,29 @@ total_input = input_tokens + cache_creation_input_tokens + cache_read_input_toke
 openai_prompt_tokens = anthropic_input_tokens + cache_creation + cache_read
 openai_cached_tokens ≈ anthropic_cache_read_input_tokens
 ```
+
+## 缓存语义测试项
+
+### 重复计数检测 (Double Counting)
+
+已知问题：部分代理/供应商（如 Kimi）在 Anthropic 格式响应中，`input_tokens` 使用 OpenAI 语义（包含缓存部分），导致 `input_tokens + cache_read` 重复计算。
+
+| # | 检查项 | 级别 | 说明 |
+|---|--------|------|------|
+| 1 | `input_tokens < cache_read_input_tokens` (when cache hit) | MUST | Anthropic 标准中 input_tokens 仅为非缓存部分，若 >= cache_read 说明包含了缓存（OpenAI 语义），total=input+cache 会重复计费 |
+| 2 | 无 OpenAI 风格 `prompt_tokens` 字段 | SHOULD | Anthropic 响应中不应出现 prompt_tokens 字段，出现说明字段混用 |
+| 3 | `input_tokens !== prompt_tokens` (if both present) | MUST | 两者相等说明 input_tokens 使用了 OpenAI 语义，代理平台按 Anthropic 标准公式计算将导致重复计费 |
+
+### 检测逻辑
+
+```
+场景 A: 标准 Anthropic (正确)
+  input_tokens=50, cache_read=10000 → 50 < 10000 ✅ 不重复
+
+场景 B: Kimi 风格 (重复计数)
+  input_tokens=10000, cache_read=10000 → 10000 >= 10000 ❌ 重复!
+  prompt_tokens=10000, input_tokens=10000 → 相等 ❌ 语义冲突!
+
+场景 C: 无缓存
+  input_tokens=500, cache_read=0 → 不触发检测
+```

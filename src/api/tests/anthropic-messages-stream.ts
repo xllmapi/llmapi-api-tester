@@ -44,6 +44,7 @@ async function run(config: ProviderConfig): Promise<TestResult> {
     let msInputTokens = 0;
     let msCacheRead = 0;
     let msCacheCreation = 0;
+    let msPromptTokens = 0;
     for (const ev of events) {
       if (ev.event === "message_start") {
         try {
@@ -54,6 +55,7 @@ async function run(config: ProviderConfig): Promise<TestResult> {
           msInputTokens = usage?.input_tokens ?? 0;
           msCacheRead = usage?.cache_read_input_tokens ?? 0;
           msCacheCreation = usage?.cache_creation_input_tokens ?? 0;
+          msPromptTokens = usage?.prompt_tokens ?? 0;
         } catch { /* ignore */ }
       }
     }
@@ -120,6 +122,42 @@ async function run(config: ProviderConfig): Promise<TestResult> {
         should("message_start usage.cache_read_input_tokens present", msCacheRead >= 0, "使用了缓存时应返回 cache_read_input_tokens", ">= 0", String(msCacheRead)),
         should("message_start usage.cache_creation_input_tokens present", msCacheCreation >= 0, "使用了缓存时应返回 cache_creation_input_tokens", ">= 0", String(msCacheCreation)),
       );
+
+      // Cache semantic: input_tokens should NOT include cached tokens
+      const inputIncludesCached = msCacheRead > 0 && msInputTokens >= msCacheRead;
+      checks.push(
+        must(
+          "input_tokens excludes cached tokens (no double counting)",
+          !inputIncludesCached,
+          `input_tokens(${msInputTokens}) >= cache_read(${msCacheRead})，说明 input_tokens 包含了缓存部分（OpenAI 语义），违反 Anthropic 标准。Anthropic 的 input_tokens 应仅包含非缓存 token，否则 total=input+cache_read 会重复计算，导致计费翻倍`,
+          `< ${msCacheRead}`,
+          String(msInputTokens),
+        ),
+      );
+
+      // Detect OpenAI-style prompt_tokens field mixing
+      if (msPromptTokens > 0) {
+        checks.push(
+          should(
+            "no OpenAI-style prompt_tokens in Anthropic streaming",
+            false,
+            `Anthropic 流式响应中出现了 OpenAI 风格的 prompt_tokens(${msPromptTokens}) 字段，属于非标准行为`,
+            "absent",
+            String(msPromptTokens),
+          ),
+        );
+        if (msPromptTokens === msInputTokens) {
+          checks.push(
+            must(
+              "input_tokens !== prompt_tokens (semantic conflict)",
+              false,
+              `input_tokens(${msInputTokens}) === prompt_tokens(${msPromptTokens})，两者语义冲突。Anthropic 的 input_tokens 应仅为非缓存部分，但此处与 prompt_tokens 相同说明使用了 OpenAI 语义（含缓存），代理平台按标准公式计算将导致重复计费`,
+              `input_tokens < prompt_tokens`,
+              `both = ${msInputTokens}`,
+            ),
+          );
+        }
+      }
     } else {
       checks.push(
         must("message_start usage.input_tokens > 0", msInputTokens > 0, "Anthropic 规范要求 message_start 包含 input_tokens（代理转换场景可能为 0，因上游 OpenAI 流开始时不提供此值）", "> 0", String(msInputTokens)),

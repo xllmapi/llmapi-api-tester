@@ -34,6 +34,7 @@ async function run(config: ProviderConfig): Promise<TestResult> {
     const inputTokens = usage?.input_tokens ?? 0;
     const cacheRead = usage?.cache_read_input_tokens ?? 0;
     const cacheCreation = usage?.cache_creation_input_tokens ?? 0;
+    const promptTokens = usage?.prompt_tokens ?? 0; // OpenAI-style field (non-standard in Anthropic)
     const totalInput = inputTokens + cacheRead + cacheCreation;
     const hasCacheFields = cacheRead > 0 || cacheCreation > 0;
 
@@ -49,7 +50,7 @@ async function run(config: ProviderConfig): Promise<TestResult> {
       must("usage.output_tokens > 0", (usage?.output_tokens ?? 0) > 0, "Anthropic 规范 usage 为必需字段", "> 0", String(usage?.output_tokens)),
     ];
 
-    // Token input checks: total_input is MUST, input_tokens alone is SHOULD (can be 0 with cache)
+    // Token input checks
     if (hasCacheFields) {
       checks.push(
         must(`total input tokens > 0 (input=${inputTokens} + cache_read=${cacheRead} + cache_creation=${cacheCreation})`, totalInput > 0, "输入 token 总量（含缓存）必须大于 0", "> 0", String(totalInput)),
@@ -57,6 +58,44 @@ async function run(config: ProviderConfig): Promise<TestResult> {
         should("usage.cache_read_input_tokens present", typeof usage?.cache_read_input_tokens === "number", "使用了缓存时应返回 cache_read_input_tokens", "number", String(cacheRead)),
         should("usage.cache_creation_input_tokens present", typeof usage?.cache_creation_input_tokens === "number", "使用了缓存时应返回 cache_creation_input_tokens", "number", String(cacheCreation)),
       );
+
+      // Cache semantic check: input_tokens should NOT include cached tokens (Anthropic standard)
+      // If input_tokens >= cache_read, it likely uses OpenAI semantics (includes cached) → double counting risk
+      const inputIncludesCached = cacheRead > 0 && inputTokens >= cacheRead;
+      checks.push(
+        must(
+          "input_tokens excludes cached tokens (no double counting)",
+          !inputIncludesCached,
+          `input_tokens(${inputTokens}) >= cache_read(${cacheRead})，说明 input_tokens 包含了缓存部分（OpenAI 语义），违反 Anthropic 标准。Anthropic 的 input_tokens 应仅包含非缓存 token，否则 total=input+cache_read 会重复计算，导致计费翻倍`,
+          `< ${cacheRead}`,
+          String(inputTokens),
+        ),
+      );
+
+      // Detect OpenAI-style prompt_tokens field mixing
+      if (promptTokens > 0) {
+        const isMixed = promptTokens === inputTokens;
+        checks.push(
+          should(
+            "no OpenAI-style prompt_tokens field in Anthropic response",
+            promptTokens === 0,
+            `Anthropic 响应中出现了 OpenAI 风格的 prompt_tokens(${promptTokens}) 字段，属于非标准行为`,
+            "absent",
+            String(promptTokens),
+          ),
+        );
+        if (isMixed) {
+          checks.push(
+            must(
+              "input_tokens !== prompt_tokens (semantic conflict)",
+              false,
+              `input_tokens(${inputTokens}) === prompt_tokens(${promptTokens})，说明两者使用相同语义（均为总量/OpenAI 风格）。Anthropic 标准中 input_tokens 应仅为非缓存部分，与 OpenAI 的 prompt_tokens（含缓存）语义不同。代理平台若按标准公式 total=input+cache_read 计算将导致重复计费`,
+              `input_tokens < prompt_tokens`,
+              `both = ${inputTokens}`,
+            ),
+          );
+        }
+      }
     } else {
       checks.push(
         must("usage.input_tokens > 0", inputTokens > 0, "Anthropic 规范要求 usage.input_tokens 为必需字段且大于 0", "> 0", String(inputTokens)),
